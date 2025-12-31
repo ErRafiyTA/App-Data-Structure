@@ -1,0 +1,944 @@
+/**
+ * ARBRES.C - Implémentation des arbres binaires et N-aires
+ */
+
+#include "arbres.h"
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Noms des parcours
+const char *PARCOURS_NOMS[4] = {"Pre-ordre", "In-ordre", "Post-ordre",
+                                "Largeur"};
+
+// ==================== HELPERS ====================
+
+NoeudGenerique *CreerNoeudGen(const char *data) {
+  NoeudGenerique *node = (NoeudGenerique *)malloc(sizeof(NoeudGenerique));
+  memset(node, 0, sizeof(NoeudGenerique));
+  strncpy(node->data, data, 31);
+  node->data[31] = '\0';
+  node->child_count = 0;
+  return node;
+}
+
+void DetruireArbre(NoeudGenerique *node) {
+  if (!node)
+    return;
+  for (int i = 0; i < node->child_count; i++) {
+    DetruireArbre(node->children[i]);
+  }
+  free(node);
+}
+
+// ==================== N-ARY TO BINARY CONVERSION (LCRS) ====================
+
+static NoeudGenerique *ConvertChildrenToSiblingChain(NoeudGenerique **children,
+                                                     int start, int count) {
+  if (start >= count || !children[start])
+    return NULL;
+
+  NoeudGenerique *bin_node = CreerNoeudGen(children[start]->data);
+  bin_node->child_count = 0;
+
+  if (children[start]->child_count > 0) {
+    bin_node->children[0] = ConvertChildrenToSiblingChain(
+        children[start]->children, 0, children[start]->child_count);
+    if (bin_node->children[0])
+      bin_node->child_count = 1;
+  }
+
+  if (start + 1 < count) {
+    bin_node->children[1] =
+        ConvertChildrenToSiblingChain(children, start + 1, count);
+    if (bin_node->children[1])
+      bin_node->child_count = 2;
+  }
+
+  return bin_node;
+}
+
+NoeudGenerique *ConvertNAryToBinary(NoeudGenerique *nary_root) {
+  if (!nary_root)
+    return NULL;
+
+  NoeudGenerique *bin_root = CreerNoeudGen(nary_root->data);
+  bin_root->child_count = 0;
+
+  if (nary_root->child_count > 0) {
+    bin_root->children[0] = ConvertChildrenToSiblingChain(
+        nary_root->children, 0, nary_root->child_count);
+    if (bin_root->children[0])
+      bin_root->child_count = 1;
+  }
+
+  return bin_root;
+}
+
+// ==================== LAYOUT ENGINE ====================
+
+static float CalculerSubtreeWidth(NoeudGenerique *node, bool is_binary) {
+  if (!node)
+    return 0;
+
+  int max_children = is_binary ? 2 : node->child_count;
+  if (max_children == 0) {
+    node->subtree_width = NODE_DIAM;
+    return NODE_DIAM;
+  }
+
+  float total = 0;
+  int actual_children = 0;
+
+  if (is_binary) {
+    float left_w = (node->child_count > 0 && node->children[0])
+                       ? CalculerSubtreeWidth(node->children[0], true)
+                       : NODE_DIAM;
+    float right_w = (node->child_count > 1 && node->children[1])
+                        ? CalculerSubtreeWidth(node->children[1], true)
+                        : NODE_DIAM;
+    total = left_w + H_SPACING + right_w;
+  } else {
+    for (int i = 0; i < node->child_count; i++) {
+      if (node->children[i]) {
+        total += CalculerSubtreeWidth(node->children[i], false);
+        actual_children++;
+      }
+    }
+    if (actual_children > 1) {
+      total += H_SPACING * (actual_children - 1);
+    }
+  }
+
+  node->subtree_width = (total > NODE_DIAM) ? total : NODE_DIAM;
+  return node->subtree_width;
+}
+
+static void AssignerCoordonnees(NoeudGenerique *node, float x_center, int depth,
+                                bool is_binary) {
+  if (!node)
+    return;
+
+  node->x = x_center;
+  node->y = depth * V_SPACING + 50;
+
+  if (is_binary) {
+    float left_w = (node->child_count > 0 && node->children[0])
+                       ? node->children[0]->subtree_width
+                       : NODE_DIAM;
+    float right_w = (node->child_count > 1 && node->children[1])
+                        ? node->children[1]->subtree_width
+                        : NODE_DIAM;
+
+    float total_w = left_w + H_SPACING + right_w;
+    float start_x = x_center - total_w / 2;
+
+    if (node->child_count > 0 && node->children[0]) {
+      AssignerCoordonnees(node->children[0], start_x + left_w / 2, depth + 1,
+                          true);
+    }
+    if (node->child_count > 1 && node->children[1]) {
+      AssignerCoordonnees(node->children[1],
+                          start_x + left_w + H_SPACING + right_w / 2, depth + 1,
+                          true);
+    }
+  } else {
+    float total_w = node->subtree_width;
+    float start_x = x_center - total_w / 2;
+    float current_x = start_x;
+
+    for (int i = 0; i < node->child_count; i++) {
+      if (node->children[i]) {
+        float child_w = node->children[i]->subtree_width;
+        AssignerCoordonnees(node->children[i], current_x + child_w / 2,
+                            depth + 1, false);
+        current_x += child_w + H_SPACING;
+      }
+    }
+  }
+}
+
+void CalculerLayout(NoeudGenerique *node, float x_start, int depth,
+                    bool is_binary) {
+  if (!node)
+    return;
+  CalculerSubtreeWidth(node, is_binary);
+  float root_x = node->subtree_width / 2;
+  AssignerCoordonnees(node, root_x, depth, is_binary);
+}
+
+// ==================== GENERATION ====================
+
+static int g_nodes_created = 0;
+
+static void GenererRecursif(NoeudGenerique *parent, int current_depth,
+                            int max_depth, int max_fils, int max_nodes,
+                            bool is_binary) {
+  if (current_depth >= max_depth || g_nodes_created >= max_nodes)
+    return;
+
+  int num_children = is_binary ? 2 : (rand() % max_fils + 1);
+  if (num_children > max_fils)
+    num_children = max_fils;
+
+  for (int i = 0; i < num_children && g_nodes_created < max_nodes; i++) {
+    if (rand() % 100 < 50 && current_depth > 0)
+      continue;
+
+    char val[32];
+    snprintf(val, sizeof(val), "%d", rand() % 100);
+    NoeudGenerique *child = CreerNoeudGen(val);
+    parent->children[parent->child_count++] = child;
+    g_nodes_created++;
+
+    GenererRecursif(child, current_depth + 1, max_depth, max_fils, max_nodes,
+                    is_binary);
+  }
+}
+
+void GenererArbreAleatoire(ArbresScreen *screen, int taille, int profondeur,
+                           int max_fils) {
+  if (screen->arbre.racine) {
+    DetruireArbre(screen->arbre.racine);
+    screen->arbre.racine = NULL;
+  }
+
+  g_nodes_created = 0;
+
+  char val[32];
+  snprintf(val, sizeof(val), "%d", rand() % 100);
+  screen->arbre.racine = CreerNoeudGen(val);
+  g_nodes_created = 1;
+  screen->arbre.taille = 1;
+
+  int actual_max_fils = screen->is_binary ? 2 : max_fils;
+  GenererRecursif(screen->arbre.racine, 0, profondeur, actual_max_fils, taille,
+                  screen->is_binary);
+
+  screen->arbre.taille = g_nodes_created;
+}
+
+// ==================== PARCOURS ====================
+
+static void CollecterPreOrdre(NoeudGenerique *node, NoeudGenerique **result,
+                              int *idx) {
+  if (!node)
+    return;
+  result[(*idx)++] = node;
+  for (int i = 0; i < node->child_count; i++) {
+    CollecterPreOrdre(node->children[i], result, idx);
+  }
+}
+
+static void CollecterInOrdre(NoeudGenerique *node, NoeudGenerique **result,
+                             int *idx, bool is_binary) {
+  if (!node)
+    return;
+  if (is_binary && node->child_count > 0 && node->children[0]) {
+    CollecterInOrdre(node->children[0], result, idx, true);
+  }
+  result[(*idx)++] = node;
+  if (is_binary && node->child_count > 1 && node->children[1]) {
+    CollecterInOrdre(node->children[1], result, idx, true);
+  }
+}
+
+static void CollecterPostOrdre(NoeudGenerique *node, NoeudGenerique **result,
+                               int *idx) {
+  if (!node)
+    return;
+  for (int i = 0; i < node->child_count; i++) {
+    CollecterPostOrdre(node->children[i], result, idx);
+  }
+  result[(*idx)++] = node;
+}
+
+static void CollecterLargeur(NoeudGenerique *root, NoeudGenerique **result,
+                             int *idx) {
+  if (!root)
+    return;
+  NoeudGenerique *queue[500];
+  int front = 0, rear = 0;
+  queue[rear++] = root;
+
+  while (front < rear) {
+    NoeudGenerique *node = queue[front++];
+    result[(*idx)++] = node;
+    for (int i = 0; i < node->child_count; i++) {
+      if (node->children[i])
+        queue[rear++] = node->children[i];
+    }
+  }
+}
+
+// ==================== ÉCRAN INIT ====================
+
+void ArbresInit(ArbresScreen *screen) {
+  memset(screen, 0, sizeof(ArbresScreen));
+
+  screen->is_binary = true;
+  screen->arbre.racine = NULL;
+  screen->arbre.taille = 0;
+
+  screen->btn_back = CreateButton(10, 10, 80, 28, "Retour", COLOR_NEON_ORANGE);
+  screen->btn_mode_binaire =
+      CreateButton(WINDOW_WIDTH - 220, 10, 100, 28, "Binaire", COLOR_NEON_BLUE);
+  screen->btn_mode_naire = CreateButton(WINDOW_WIDTH - 115, 10, 100, 28,
+                                        "N-Aire", COLOR_NEON_PURPLE);
+
+  screen->input_taille = CreateInputBox(0, 0, 55, 26, 4);
+  screen->input_profondeur = CreateInputBox(0, 0, 50, 26, 2);
+  screen->input_max_fils = CreateInputBox(0, 0, 50, 26, 2);
+
+  screen->btn_generer = CreateButton(0, 0, 80, 28, "Generer", COLOR_NEON_GREEN);
+  screen->btn_preordre = CreateButton(0, 0, 65, 28, "Prefixe", COLOR_NEON_BLUE);
+  screen->btn_inordre = CreateButton(0, 0, 55, 28, "Infixe", COLOR_NEON_BLUE);
+  screen->btn_postordre =
+      CreateButton(0, 0, 70, 28, "Postfixe", COLOR_NEON_BLUE);
+  screen->btn_largeur = CreateButton(0, 0, 60, 28, "Larg", COLOR_NEON_BLUE);
+
+  screen->btn_speed_down = CreateButton(0, 0, 28, 28, "-", COLOR_NEON_PURPLE);
+  screen->btn_speed_up = CreateButton(0, 0, 28, 28, "+", COLOR_NEON_PURPLE);
+  screen->anim_speed = 0.5f;
+
+  screen->btn_stop =
+      CreateButton(WINDOW_WIDTH - 165, 52, 65, 28, "STOP", COLOR_NEON_RED);
+  screen->btn_vider =
+      CreateButton(WINDOW_WIDTH - 90, 52, 75, 28, "Vider", COLOR_NEON_RED);
+
+  screen->btn_convertir =
+      CreateButton(0, 0, 90, 28, "-> Binaire", COLOR_NEON_GREEN);
+  screen->is_converting = false;
+  screen->convert_progress = 0.0f;
+  screen->mario_anim_frame = 0;
+  screen->mario_texture = LoadTexture("assets/mario_push.png");
+
+  screen->popup_btn_gauche =
+      CreateButton(0, 0, 70, 30, "GAUCHE", COLOR_NEON_BLUE);
+  screen->popup_btn_droite =
+      CreateButton(0, 0, 70, 30, "DROITE", COLOR_NEON_BLUE);
+  screen->popup_btn_ajouter =
+      CreateButton(0, 0, 80, 30, "AJOUTER", COLOR_NEON_GREEN);
+  screen->popup_btn_annuler =
+      CreateButton(0, 0, 70, 30, "ANNULER", COLOR_NEON_RED);
+
+  screen->zoom = 1.0f;
+  screen->offset =
+      (Vector2){(WINDOW_WIDTH - 20) / 2 + 10, (WINDOW_HEIGHT - 140) / 2 + 90};
+  screen->popup_open = false;
+  screen->popup_parent = NULL;
+  screen->parcours_result = NULL;
+
+  screen->show_root_input = true;
+  screen->root_input_text[0] = '\0';
+  screen->root_input_cursor = 0;
+}
+
+// ==================== ÉCRAN UPDATE ====================
+
+AppScreen ArbresUpdate(ArbresScreen *screen) {
+  float dt = GetFrameTime();
+
+  // ===== POPUP HANDLING FIRST - blocks other interactions =====
+  if (screen->popup_open) {
+    int key = GetCharPressed();
+    while (key > 0) {
+      if (screen->popup_cursor < 31 && key >= 32 && key <= 126) {
+        screen->popup_text[screen->popup_cursor++] = (char)key;
+        screen->popup_text[screen->popup_cursor] = '\0';
+      }
+      key = GetCharPressed();
+    }
+    if (IsKeyPressed(KEY_BACKSPACE) && screen->popup_cursor > 0) {
+      screen->popup_text[--screen->popup_cursor] = '\0';
+    }
+    if (IsKeyPressed(KEY_ESCAPE)) {
+      screen->popup_open = false;
+      screen->popup_parent = NULL;
+    }
+
+    float px = WINDOW_WIDTH / 2 - 120;
+    float py = WINDOW_HEIGHT / 2 - 60;
+
+    if (screen->popup_parent == NULL) {
+      screen->popup_btn_ajouter.bounds = (Rectangle){px + 40, py + 80, 80, 30};
+      screen->popup_btn_annuler.bounds = (Rectangle){px + 140, py + 80, 70, 30};
+
+      if ((IsKeyPressed(KEY_ENTER) ||
+           UpdateButton(&screen->popup_btn_ajouter)) &&
+          strlen(screen->popup_text) > 0) {
+        screen->arbre.racine = CreerNoeudGen(screen->popup_text);
+        screen->arbre.taille = 1;
+        CalculerLayout(screen->arbre.racine, 0, 0, screen->is_binary);
+        Rectangle treeRect = {10, 90, WINDOW_WIDTH - 20, WINDOW_HEIGHT - 130};
+        screen->offset.x = treeRect.x + treeRect.width / 2 -
+                           screen->arbre.racine->x * screen->zoom;
+        screen->offset.y = treeRect.y + treeRect.height / 2 -
+                           screen->arbre.racine->y * screen->zoom;
+        screen->show_root_input = false;
+        screen->popup_open = false;
+        snprintf(screen->status_message, sizeof(screen->status_message),
+                 "Racine '%s' creee", screen->popup_text);
+        screen->status_timer = 3.0f;
+      }
+      if (UpdateButton(&screen->popup_btn_annuler)) {
+        screen->popup_open = false;
+      }
+    } else if (screen->is_binary) {
+      screen->popup_btn_gauche.bounds = (Rectangle){px + 10, py + 80, 70, 30};
+      screen->popup_btn_droite.bounds = (Rectangle){px + 90, py + 80, 70, 30};
+      screen->popup_btn_annuler.bounds = (Rectangle){px + 170, py + 80, 70, 30};
+
+      bool has_left = screen->popup_parent->child_count > 0 &&
+                      screen->popup_parent->children[0] != NULL;
+      bool has_right = screen->popup_parent->child_count > 1 &&
+                       screen->popup_parent->children[1] != NULL;
+
+      if (UpdateButton(&screen->popup_btn_gauche) && !has_left &&
+          strlen(screen->popup_text) > 0) {
+        NoeudGenerique *child = CreerNoeudGen(screen->popup_text);
+        if (screen->popup_parent->child_count == 0) {
+          screen->popup_parent->children[0] = child;
+          screen->popup_parent->child_count = 1;
+        } else {
+          screen->popup_parent->children[0] = child;
+        }
+        screen->arbre.taille++;
+        CalculerLayout(screen->arbre.racine, 0, 0, screen->is_binary);
+        screen->popup_open = false;
+        snprintf(screen->status_message, sizeof(screen->status_message),
+                 "Ajoute '%s' a gauche", screen->popup_text);
+        screen->status_timer = 2.0f;
+      }
+      if (UpdateButton(&screen->popup_btn_droite) && !has_right &&
+          strlen(screen->popup_text) > 0) {
+        NoeudGenerique *child = CreerNoeudGen(screen->popup_text);
+        while (screen->popup_parent->child_count < 2) {
+          screen->popup_parent->children[screen->popup_parent->child_count++] =
+              NULL;
+        }
+        screen->popup_parent->children[1] = child;
+        screen->arbre.taille++;
+        CalculerLayout(screen->arbre.racine, 0, 0, screen->is_binary);
+        screen->popup_open = false;
+        snprintf(screen->status_message, sizeof(screen->status_message),
+                 "Ajoute '%s' a droite", screen->popup_text);
+        screen->status_timer = 2.0f;
+      }
+      if (UpdateButton(&screen->popup_btn_annuler)) {
+        screen->popup_open = false;
+        screen->popup_parent = NULL;
+      }
+    } else {
+      screen->popup_btn_ajouter.bounds = (Rectangle){px + 40, py + 80, 80, 30};
+      screen->popup_btn_annuler.bounds = (Rectangle){px + 130, py + 80, 70, 30};
+
+      if (UpdateButton(&screen->popup_btn_ajouter) &&
+          strlen(screen->popup_text) > 0) {
+        if (screen->popup_parent->child_count < MAX_CHILDREN) {
+          NoeudGenerique *child = CreerNoeudGen(screen->popup_text);
+          screen->popup_parent->children[screen->popup_parent->child_count++] =
+              child;
+          screen->arbre.taille++;
+          CalculerLayout(screen->arbre.racine, 0, 0, screen->is_binary);
+          screen->popup_open = false;
+          snprintf(screen->status_message, sizeof(screen->status_message),
+                   "Ajoute '%s'", screen->popup_text);
+          screen->status_timer = 2.0f;
+        }
+      }
+      if (UpdateButton(&screen->popup_btn_annuler)) {
+        screen->popup_open = false;
+        screen->popup_parent = NULL;
+      }
+    }
+    return SCREEN_ARBRES; // BLOCK all other interactions when popup open
+  }
+
+  // Root input mode
+  if (screen->show_root_input && !screen->arbre.racine) {
+    Rectangle treeRect = {10, 90, WINDOW_WIDTH - 20, WINDOW_HEIGHT - 130};
+    float cx = treeRect.x + treeRect.width / 2;
+    float cy = treeRect.y + treeRect.height / 2 - 30;
+    float radius = NODE_DIAM / 2;
+
+    Vector2 mousePos = GetMousePosition();
+    float dx = mousePos.x - cx;
+    float dy = mousePos.y - cy;
+
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) &&
+        dx * dx + dy * dy < radius * radius) {
+      screen->popup_open = true;
+      screen->popup_parent = NULL;
+      screen->popup_text[0] = '\0';
+      screen->popup_cursor = 0;
+    }
+  }
+
+  // Back button
+  if (UpdateButton(&screen->btn_back)) {
+    if (screen->parcours_result) {
+      free(screen->parcours_result);
+      screen->parcours_result = NULL;
+    }
+    return SCREEN_WELCOME;
+  }
+
+  // Mode toggle
+  if (UpdateButton(&screen->btn_mode_binaire) && !screen->is_binary) {
+    if (screen->arbre.racine) {
+      DetruireArbre(screen->arbre.racine);
+      screen->arbre.racine = NULL;
+      screen->arbre.taille = 0;
+    }
+    screen->is_binary = true;
+    screen->show_root_input = true;
+    screen->popup_open = false;
+    screen->parcours_animating = false;
+    snprintf(screen->status_message, sizeof(screen->status_message),
+             "Mode: BINAIRE");
+    screen->status_timer = 2.0f;
+  }
+  if (UpdateButton(&screen->btn_mode_naire) && screen->is_binary) {
+    if (screen->arbre.racine) {
+      DetruireArbre(screen->arbre.racine);
+      screen->arbre.racine = NULL;
+      screen->arbre.taille = 0;
+    }
+    screen->is_binary = false;
+    screen->show_root_input = true;
+    screen->popup_open = false;
+    screen->parcours_animating = false;
+    snprintf(screen->status_message, sizeof(screen->status_message),
+             "Mode: N-AIRE");
+    screen->status_timer = 2.0f;
+  }
+
+  // Generation inputs
+  UpdateInputBox(&screen->input_taille);
+  UpdateInputBox(&screen->input_profondeur);
+  if (!screen->is_binary) {
+    UpdateInputBox(&screen->input_max_fils);
+  }
+
+  // Generate button
+  if (UpdateButton(&screen->btn_generer)) {
+    int taille = atoi(screen->input_taille.text);
+    int prof = atoi(screen->input_profondeur.text);
+    int max_fils = atoi(screen->input_max_fils.text);
+    if (taille < 1)
+      taille = 10;
+    if (prof < 1)
+      prof = 3;
+    if (max_fils < 1)
+      max_fils = 3;
+    if (max_fils > MAX_CHILDREN)
+      max_fils = MAX_CHILDREN;
+
+    GenererArbreAleatoire(screen, taille, prof, max_fils);
+    CalculerLayout(screen->arbre.racine, 0, 0, screen->is_binary);
+    Rectangle treeRect = {10, 90, WINDOW_WIDTH - 20, WINDOW_HEIGHT - 130};
+    screen->offset.x = treeRect.x + treeRect.width / 2 -
+                       screen->arbre.racine->x * screen->zoom;
+    screen->offset.y = treeRect.y + 50;
+    screen->show_root_input = false;
+    screen->status_timer = 2.0f;
+  }
+
+  // Clear button
+  if (UpdateButton(&screen->btn_vider)) {
+    if (screen->arbre.racine) {
+      DetruireArbre(screen->arbre.racine);
+      screen->arbre.racine = NULL;
+      screen->arbre.taille = 0;
+    }
+    screen->popup_open = false;
+    screen->popup_parent = NULL;
+    screen->parcours_animating = false;
+    screen->show_root_input = true;
+    screen->status_timer = 2.0f;
+  }
+
+  // Conversion button
+  if (!screen->is_binary && screen->arbre.racine && !screen->is_converting) {
+    if (UpdateButton(&screen->btn_convertir)) {
+      screen->is_converting = true;
+      screen->convert_progress = 0.0f;
+    }
+  }
+
+  // Conversion animation
+  if (screen->is_converting) {
+    screen->convert_progress += dt * 0.8f;
+    if (screen->convert_progress >= 1.0f) {
+      NoeudGenerique *old_tree = screen->arbre.racine;
+      screen->arbre.racine = ConvertNAryToBinary(old_tree);
+      DetruireArbre(old_tree);
+      screen->is_binary = true;
+      screen->is_converting = false;
+      if (screen->arbre.racine) {
+        CalculerLayout(screen->arbre.racine, 0, 0, true);
+      }
+    }
+  }
+
+  // Traversal buttons
+  if (!screen->parcours_animating && screen->arbre.racine) {
+    TypeParcours types[4] = {PARCOURS_PREORDRE, PARCOURS_INORDRE,
+                             PARCOURS_POSTORDRE, PARCOURS_LARGEUR};
+    Button *btns[4] = {&screen->btn_preordre, &screen->btn_inordre,
+                       &screen->btn_postordre, &screen->btn_largeur};
+
+    for (int i = 0; i < 4; i++) {
+      if (i == 1 && !screen->is_binary)
+        continue;
+      if (UpdateButton(btns[i])) {
+        if (screen->parcours_result)
+          free(screen->parcours_result);
+        screen->parcours_result =
+            (NoeudGenerique **)malloc(500 * sizeof(NoeudGenerique *));
+        screen->parcours_size = 0;
+
+        int idx = 0;
+        switch (types[i]) {
+        case PARCOURS_PREORDRE:
+          CollecterPreOrdre(screen->arbre.racine, screen->parcours_result,
+                            &idx);
+          break;
+        case PARCOURS_INORDRE:
+          CollecterInOrdre(screen->arbre.racine, screen->parcours_result, &idx,
+                           screen->is_binary);
+          break;
+        case PARCOURS_POSTORDRE:
+          CollecterPostOrdre(screen->arbre.racine, screen->parcours_result,
+                             &idx);
+          break;
+        case PARCOURS_LARGEUR:
+          CollecterLargeur(screen->arbre.racine, screen->parcours_result, &idx);
+          break;
+        }
+        screen->parcours_size = idx;
+        screen->parcours_current_idx = 0;
+        screen->parcours_timer = 0;
+        screen->parcours_animating = true;
+        screen->parcours_type = types[i];
+      }
+    }
+  }
+
+  // Stop button
+  if (UpdateButton(&screen->btn_stop)) {
+    screen->parcours_animating = false;
+    screen->highlighted_node = NULL;
+  }
+
+  // Speed control
+  if (UpdateButton(&screen->btn_speed_down)) {
+    screen->anim_speed += 0.1f;
+    if (screen->anim_speed > 2.0f)
+      screen->anim_speed = 2.0f;
+  }
+  if (UpdateButton(&screen->btn_speed_up)) {
+    screen->anim_speed -= 0.1f;
+    if (screen->anim_speed < 0.1f)
+      screen->anim_speed = 0.1f;
+  }
+
+  // Animation update
+  if (screen->parcours_animating && screen->parcours_result) {
+    screen->parcours_timer += dt;
+    if (screen->parcours_timer >= screen->anim_speed) {
+      screen->parcours_timer = 0;
+      if (screen->parcours_current_idx < screen->parcours_size) {
+        screen->highlighted_node =
+            screen->parcours_result[screen->parcours_current_idx];
+        screen->parcours_current_idx++;
+      } else {
+        screen->parcours_animating = false;
+        screen->highlighted_node = NULL;
+        screen->result_text[0] = '\0';
+        for (int i = 0; i < screen->parcours_size; i++) {
+          if (i > 0)
+            strncat(screen->result_text, " -> ", 500);
+          strncat(screen->result_text, screen->parcours_result[i]->data, 500);
+        }
+        screen->result_type = screen->parcours_type;
+        screen->show_result_popup = true;
+      }
+    }
+  }
+
+  // Status timer
+  if (screen->status_timer > 0)
+    screen->status_timer -= dt;
+
+  // Zoom
+  float wheel = GetMouseWheelMove();
+  if (wheel != 0) {
+    Vector2 mouse = GetMousePosition();
+    float oldZoom = screen->zoom;
+    screen->zoom += wheel * 0.1f;
+    if (screen->zoom < 0.3f)
+      screen->zoom = 0.3f;
+    if (screen->zoom > 2.0f)
+      screen->zoom = 2.0f;
+    float zoomFactor = screen->zoom / oldZoom;
+    screen->offset.x = mouse.x - (mouse.x - screen->offset.x) * zoomFactor;
+    screen->offset.y = mouse.y - (mouse.y - screen->offset.y) * zoomFactor;
+  }
+
+  // Pan and node click
+  Rectangle treeRect = {10, 90, WINDOW_WIDTH - 20, WINDOW_HEIGHT - 130};
+  Vector2 mousePos = GetMousePosition();
+  bool mouseInTreeArea = CheckCollisionPointRec(mousePos, treeRect);
+
+  bool clickedOnNode = false;
+  if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && mouseInTreeArea &&
+      !screen->show_result_popup) {
+    float radius = (NODE_DIAM / 2) * screen->zoom;
+    for (int i = 0; i < screen->node_count; i++) {
+      float dx = mousePos.x - screen->node_positions[i].x;
+      float dy = mousePos.y - screen->node_positions[i].y;
+      if (dx * dx + dy * dy < radius * radius) {
+        clickedOnNode = true;
+        if (!screen->parcours_animating) {
+          screen->popup_open = true;
+          screen->popup_parent = screen->node_positions[i].node;
+          screen->popup_text[0] = '\0';
+          screen->popup_cursor = 0;
+        }
+        break;
+      }
+    }
+  }
+
+  if (mouseInTreeArea && !screen->show_result_popup &&
+      ((IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && !clickedOnNode) ||
+       IsMouseButtonPressed(MOUSE_RIGHT_BUTTON))) {
+    screen->dragging = true;
+    screen->drag_start = mousePos;
+  }
+  if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON) ||
+      IsMouseButtonReleased(MOUSE_RIGHT_BUTTON)) {
+    screen->dragging = false;
+  }
+  if (screen->dragging) {
+    Vector2 mouse = GetMousePosition();
+    screen->offset.x += mouse.x - screen->drag_start.x;
+    screen->offset.y += mouse.y - screen->drag_start.y;
+    screen->drag_start = mouse;
+  }
+
+  return SCREEN_ARBRES;
+}
+
+// ==================== DRAWING ====================
+
+static void DrawTreeGrid(ArbresScreen *screen, Rectangle area) {
+  int grid_size = 50;
+  Color gridColor = {30, 40, 60, 255};
+  float ox = fmodf(screen->offset.x, (float)grid_size);
+  float oy = fmodf(screen->offset.y, (float)grid_size);
+  if (ox < 0)
+    ox += grid_size;
+  if (oy < 0)
+    oy += grid_size;
+
+  for (float x = area.x + ox; x < area.x + area.width; x += grid_size) {
+    DrawLine((int)x, (int)area.y, (int)x, (int)(area.y + area.height),
+             gridColor);
+  }
+  for (float y = area.y + oy; y < area.y + area.height; y += grid_size) {
+    DrawLine((int)area.x, (int)y, (int)(area.x + area.width), (int)y,
+             gridColor);
+  }
+}
+
+static void DrawNodeWithOffset(NoeudGenerique *node, ArbresScreen *screen,
+                               NoeudGenerique *highlighted, bool selected) {
+  float zoom = screen->zoom;
+  float r = (NODE_DIAM / 2) * zoom;
+  float x = node->x * zoom + screen->offset.x;
+  float y = node->y * zoom + screen->offset.y;
+
+  if (node == highlighted) {
+    DrawCircle(x, y, r + 6, (Color){63, 185, 80, 80});
+  }
+  if (selected) {
+    DrawCircleLines(x, y, r + 4, COLOR_NEON_ORANGE);
+  }
+
+  Color fill = (node == highlighted) ? COLOR_NEON_GREEN : COLOR_PANEL;
+  DrawCircle(x, y, r, fill);
+  DrawCircleLines(x, y, r, COLOR_NEON_ORANGE);
+
+  int fontSize = (int)(14 * zoom);
+  int textW = MeasureText(node->data, fontSize);
+  DrawText(node->data, x - textW / 2, y - fontSize / 2, fontSize,
+           COLOR_TEXT_WHITE);
+}
+
+static void DrawEdgesWithOffset(NoeudGenerique *node, ArbresScreen *screen) {
+  if (!node)
+    return;
+  float zoom = screen->zoom;
+  float r = (NODE_DIAM / 2) * zoom;
+  float x1 = node->x * zoom + screen->offset.x;
+  float y1 = node->y * zoom + screen->offset.y;
+
+  for (int i = 0; i < node->child_count; i++) {
+    if (node->children[i]) {
+      float x2 = node->children[i]->x * zoom + screen->offset.x;
+      float y2 = node->children[i]->y * zoom + screen->offset.y;
+      DrawLineEx((Vector2){x1, y1 + r}, (Vector2){x2, y2 - r}, 2,
+                 COLOR_NEON_BLUE);
+      DrawEdgesWithOffset(node->children[i], screen);
+    }
+  }
+}
+
+static void CollectNodePositionsWithOffset(NoeudGenerique *node,
+                                           ArbresScreen *screen) {
+  if (!node || screen->node_count >= 500)
+    return;
+  float x = node->x * screen->zoom + screen->offset.x;
+  float y = node->y * screen->zoom + screen->offset.y;
+  screen->node_positions[screen->node_count].node = node;
+  screen->node_positions[screen->node_count].x = x;
+  screen->node_positions[screen->node_count].y = y;
+  screen->node_count++;
+  for (int i = 0; i < node->child_count; i++) {
+    CollectNodePositionsWithOffset(node->children[i], screen);
+  }
+}
+
+static void DrawNodesWithOffset(NoeudGenerique *node, ArbresScreen *screen,
+                                NoeudGenerique *highlighted,
+                                NoeudGenerique *selected) {
+  if (!node)
+    return;
+  DrawNodeWithOffset(node, screen, highlighted, node == selected);
+  for (int i = 0; i < node->child_count; i++) {
+    DrawNodesWithOffset(node->children[i], screen, highlighted, selected);
+  }
+}
+
+void ArbresDrawTree(ArbresScreen *screen) {
+  DrawRectangleGradientV(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, COLOR_BG_DARK,
+                         COLOR_BG_LIGHT);
+
+  const char *title = screen->is_binary ? "ARBRE BINAIRE" : "ARBRE N-AIRE";
+  Color titleColor = screen->is_binary ? COLOR_NEON_BLUE : COLOR_NEON_PURPLE;
+  int titleW = MeasureText(title, 20);
+  DrawText(title, WINDOW_WIDTH / 2 - titleW / 2, 12, 20, titleColor);
+
+  DrawButton(&screen->btn_back);
+  DrawButton(&screen->btn_mode_binaire);
+  DrawButton(&screen->btn_mode_naire);
+
+  // Draw UI frames and buttons (simplified for brevity)
+  DrawButton(&screen->btn_generer);
+  DrawButton(&screen->btn_preordre);
+  DrawButton(&screen->btn_inordre);
+  DrawButton(&screen->btn_postordre);
+  DrawButton(&screen->btn_largeur);
+  DrawButton(&screen->btn_speed_down);
+  DrawButton(&screen->btn_speed_up);
+  DrawButton(&screen->btn_stop);
+  DrawButton(&screen->btn_vider);
+  DrawInputBox(&screen->input_taille);
+  DrawInputBox(&screen->input_profondeur);
+  if (!screen->is_binary)
+    DrawInputBox(&screen->input_max_fils);
+
+  Rectangle treeRect = {10, 90, WINDOW_WIDTH - 20, WINDOW_HEIGHT - 130};
+  DrawRectangleRec(treeRect, COLOR_BG_DARK);
+  BeginScissorMode((int)treeRect.x, (int)treeRect.y, (int)treeRect.width,
+                   (int)treeRect.height);
+  DrawTreeGrid(screen, treeRect);
+
+  screen->node_count = 0;
+  if (screen->arbre.racine) {
+    CollectNodePositionsWithOffset(screen->arbre.racine, screen);
+    DrawEdgesWithOffset(screen->arbre.racine, screen);
+    DrawNodesWithOffset(screen->arbre.racine, screen, screen->highlighted_node,
+                        screen->popup_parent);
+  } else if (screen->show_root_input) {
+    float cx = treeRect.x + treeRect.width / 2;
+    float cy = treeRect.y + treeRect.height / 2 - 30;
+    float radius = NODE_DIAM / 2;
+    DrawCircle((int)cx, (int)cy, radius + 3, COLOR_NEON_ORANGE);
+    DrawCircle((int)cx, (int)cy, radius, COLOR_PANEL);
+    const char *racineText = "RACINE";
+    int textW = MeasureText(racineText, 14);
+    DrawText(racineText, (int)cx - textW / 2, (int)cy - 7, 14,
+             COLOR_NEON_ORANGE);
+    DrawText("Cliquez pour commencer", (int)cx - 80, (int)cy + radius + 20, 14,
+             COLOR_NEON_GREEN);
+  }
+  EndScissorMode();
+  DrawRectangleLinesEx(treeRect, 1, COLOR_BORDER);
+
+  // Result popup
+  if (screen->show_result_popup) {
+    float px = WINDOW_WIDTH / 2 - 300;
+    float py = WINDOW_HEIGHT / 2 - 150;
+    DrawRectangleRounded((Rectangle){px, py, 600, 300}, 0.05f, 8, COLOR_PANEL);
+    DrawRectangleRoundedLines((Rectangle){px, py, 600, 300}, 0.05f, 8, 2,
+                              COLOR_NEON_GREEN);
+    DrawText(screen->result_text, px + 20, py + 75, 14, COLOR_TEXT_MAIN);
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_ESCAPE) ||
+        IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+      screen->show_result_popup = false;
+    }
+  }
+
+  // Popup dialog
+  if (screen->popup_open) {
+    float px = WINDOW_WIDTH / 2 - 120;
+    float py = WINDOW_HEIGHT / 2 - 60;
+    DrawRectangleRounded((Rectangle){px, py, 240, 120}, 0.1f, 8, COLOR_PANEL);
+    DrawRectangleRoundedLines((Rectangle){px, py, 240, 120}, 0.1f, 8, 2,
+                              COLOR_NEON_ORANGE);
+
+    Rectangle inputRect = {px + 20, py + 35, 200, 30};
+    DrawRectangleRec(inputRect, COLOR_BG_DARK);
+    DrawRectangleLinesEx(inputRect, 1, COLOR_BORDER);
+    DrawText(screen->popup_text, inputRect.x + 5, inputRect.y + 8, 14,
+             COLOR_TEXT_WHITE);
+    if ((int)(GetTime() * 2) % 2 == 0) {
+      int cursorX = inputRect.x + 5 + MeasureText(screen->popup_text, 14);
+      DrawRectangle(cursorX, inputRect.y + 5, 2, 20, COLOR_NEON_ORANGE);
+    }
+
+    if (screen->popup_parent == NULL) {
+      DrawText("CREER LA RACINE", px + 50, py + 10, 14, COLOR_NEON_GREEN);
+    } else {
+      DrawText("AJOUTER UN NOEUD", px + 40, py + 10, 14, COLOR_TEXT_MAIN);
+    }
+    DrawButton(&screen->popup_btn_ajouter);
+    DrawButton(&screen->popup_btn_annuler);
+    if (screen->is_binary && screen->popup_parent != NULL) {
+      DrawButton(&screen->popup_btn_gauche);
+      DrawButton(&screen->popup_btn_droite);
+    }
+  }
+
+  // Status
+  char infoStr[128];
+  snprintf(infoStr, sizeof(infoStr), "Noeuds: %d | Zoom: %.0f%%",
+           screen->arbre.taille, screen->zoom * 100);
+  DrawText(infoStr, 20, WINDOW_HEIGHT - 30, 14, COLOR_TEXT_MAIN);
+}
+
+void ArbresUnload(ArbresScreen *screen) {
+  if (screen->arbre.racine) {
+    DetruireArbre(screen->arbre.racine);
+    screen->arbre.racine = NULL;
+  }
+  if (screen->parcours_result) {
+    free(screen->parcours_result);
+    screen->parcours_result = NULL;
+  }
+}
